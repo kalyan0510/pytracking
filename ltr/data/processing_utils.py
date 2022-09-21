@@ -354,7 +354,8 @@ def transform_box_to_crop(box: torch.Tensor, crop_box: torch.Tensor, crop_sz: to
     box_out[2:] *= scale_factor
     return box_out
 
-
+# kalyan-understanding
+# this has good method doc
 def target_image_crop(frames, box_extract, box_gt, search_area_factor, output_sz, mode: str = 'replicate',
                       max_scale_change=None, masks=None):
     """ For each frame in frames, extracts a square crop centered at box_extract, of area search_area_factor^2

@@ -23,7 +23,7 @@ class FilterPredictor(nn.Module):
         self.feature_sz = feature_sz
         self.use_test_frame_encoding = use_test_frame_encoding
 
-        self.box_encoding = MLP([4, self.transformer.d_model//4, self.transformer.d_model, self.transformer.d_model])
+        self.box_encoding = MLP([2, self.transformer.d_model//4, self.transformer.d_model, self.transformer.d_model])
 
         self.query_embed_fg = nn.Embedding(1, self.transformer.d_model)
 
@@ -46,7 +46,7 @@ class FilterPredictor(nn.Module):
 
         return pos.reshape(nframes, nseq, -1, h, w)
 
-    def predict_filter(self, train_feat, test_feat, train_label, train_ltrb_target, *args, **kwargs):
+    def predict_filter(self, train_feat, test_feat, train_label, train_ltrb_target, trajectory, *args, **kwargs):
         def printv(x, y):
             print(f"{x}: {y.shape} , mean:{y.mean():.4f}, min:{y.min():.4f}, max:{y.max():.4f}, std:{y.std():.4f}")
 
@@ -55,8 +55,8 @@ class FilterPredictor(nn.Module):
             train_feat = train_feat.unsqueeze(1)
         if test_feat.dim() == 4:
             test_feat = test_feat.unsqueeze(1)
-        if train_ltrb_target.dim() == 4:
-            train_ltrb_target = train_ltrb_target.unsqueeze(1)
+        # if train_ltrb_target.dim() == 4:
+        #     train_ltrb_target = train_ltrb_target.unsqueeze(1)
 
         h, w = test_feat.shape[-2:]
 
@@ -68,29 +68,28 @@ class FilterPredictor(nn.Module):
 
         test_feat_seq = test_feat.permute(1, 2, 0, 3, 4).flatten(2).permute(2, 0, 1) # Nf_te*H*W, Ns, C
         train_feat_seq = train_feat.permute(1, 2, 0, 3, 4).flatten(2).permute(2, 0, 1) # Nf_tr*H*W, Ns, C
-        train_label_seq = train_label.permute(1, 0, 2, 3).flatten(1).permute(1, 0).unsqueeze(2) # Nf_tr*H*W,Ns,1
-        train_ltrb_target_seq_T = train_ltrb_target.permute(1, 2, 0, 3, 4).flatten(2) # Ns,4,Nf_tr*H*W
+        # train_label_seq = train_label.permute(1, 0, 2, 3).flatten(1).permute(1, 0).unsqueeze(2) # Nf_tr*H*W,Ns,1
+        # train_ltrb_target_seq_T = train_ltrb_target.permute(1, 2, 0, 3, 4).flatten(2) # Ns,4,Nf_tr*H*W
+        # printv("Traj Shape", trajectory)
+        traj_seq = trajectory.permute(1,2,0,3,4).flatten(2)
+        # printv("Traj Seq Shape", traj_seq)
 
         test_pos = test_pos.permute(1, 2, 0, 3, 4).flatten(2).permute(2, 0, 1)
         train_pos = train_pos.permute(1, 2, 0, 3, 4).flatten(2).permute(2, 0, 1)
 
-        fg_token = self.query_embed_fg.weight.reshape(1, 1, -1)
-        train_label_enc = fg_token * train_label_seq
+        # fg_token = self.query_embed_fg.weight.reshape(1, 1, -1)
+        # train_label_enc = fg_token * train_label_seq
 
-        # printv('train_ltrb_target_seq_T', train_ltrb_target_seq_T)
-        train_ltrb_target_enc = self.box_encoding(train_ltrb_target_seq_T).permute(2,0,1) # Nf_tr*H*H,Ns,C
-        #
-        # printv('train_feat_seq', train_feat_seq)
-        # printv('train_label_enc', train_label_enc)
-        # printv('train_ltrb_target_enc', train_ltrb_target_enc)
-        # printv('test_feat_seq', test_feat_seq)
+        trajectory_enc = self.box_encoding(traj_seq).permute(2,0,1) # Nf_tr*H*H,Ns,C
+        # printv('Trajectory Seq ', traj_seq)
+        # printv('Trajectory Encoding ', trajectory_enc)
 
         if self.use_test_frame_encoding:
             test_token = self.query_embed_test.weight.reshape(1, 1, -1)
             test_label_enc = torch.ones_like(test_feat_seq) * test_token
-            feat = torch.cat([train_feat_seq + train_label_enc + train_ltrb_target_enc, test_feat_seq + test_label_enc], dim=0)
+            feat = torch.cat([train_feat_seq  , test_feat_seq + trajectory_enc + test_label_enc], dim=0)
         else:
-            feat = torch.cat([train_feat_seq + train_label_enc + train_ltrb_target_enc, test_feat_seq], dim=0)
+            feat = torch.cat([train_feat_seq  , test_feat_seq + trajectory_enc], dim=0)
 
         pos = torch.cat([train_pos, test_pos], dim=0)
 
@@ -103,8 +102,6 @@ class FilterPredictor(nn.Module):
 
     def predict_cls_bbreg_filters_parallel(self, train_feat, test_feat, train_label, num_gth_frames, train_ltrb_target, *args, **kwargs):
         # train_label size guess: Nf_tr, Ns, H, W.
-        # classifier and regressor both heads require differently attended transformer outputs. For Regression the
-        # ground truth features are masked
         if train_feat.dim() == 4:
             train_feat = train_feat.unsqueeze(1)
         if test_feat.dim() == 4:
@@ -145,8 +142,6 @@ class FilterPredictor(nn.Module):
 
         pos = torch.cat([train_pos, test_pos], dim=0)
 
-        # in the other batch (which is duplicated above), the mask prevents attention on some embeddings
-        # this mask prevents attention on the ground truth frame in train images
         src_key_padding_mask = torch.zeros(feat.shape[1], feat.shape[0]).bool()
         src_key_padding_mask[1, num_gth_frames*H*W:-h*w] = 1.
         src_key_padding_mask = src_key_padding_mask.bool().to(feat.device)

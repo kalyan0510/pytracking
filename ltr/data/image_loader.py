@@ -31,14 +31,17 @@ def default_image_loader(path):
 default_image_loader.use_jpeg4py = None
 
 
+
 def jpeg4py_loader(path):
-    """ Image reading using jpeg4py https://github.com/ajkxyz/jpeg4py"""
-    try:
-        return jpeg4py.JPEG(path).decode()
-    except Exception as e:
-        print('ERROR: Could not read image "{}"'.format(path))
-        print(e)
-        return None
+    return opencv_loader(path)
+    # """ Image reading using jpeg4py https://github.com/ajkxyz/jpeg4py"""
+    # try:
+    #     return jpeg4py.JPEG(path).decode()
+    # except Exception as e:
+    #     print('ERROR: Could not read image "{}"'.format(path))
+    #     print(e)
+    #     return None
+
 
 
 def opencv_loader(path):

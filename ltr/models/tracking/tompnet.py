@@ -7,7 +7,9 @@ from ltr import model_constructor
 
 import ltr.models.transformer.transformer as trans
 import ltr.models.transformer.filter_predictor as fp
+import ltr.models.transformer.filter_predictor_temporal as tfp
 import ltr.models.transformer.heads as heads
+from ltr import MultiGPU
 
 
 class ToMPnet(nn.Module):
@@ -78,10 +80,12 @@ class ToMPnet(nn.Module):
         return OrderedDict({l: all_feat[l] for l in layers})
 
 
+
+
 @model_constructor
 def tompnet50(filter_size=4, head_layer='layer3', backbone_pretrained=True, head_feat_blocks=0, head_feat_norm=True,
               final_conv=True, out_feature_dim=512, frozen_backbone_layers=(), nhead=8, num_encoder_layers=6,
-              num_decoder_layers=6, dim_feedforward=2048, feature_sz=18, use_test_frame_encoding=True):
+              num_decoder_layers=6, dim_feedforward=2048, feature_sz=18, use_test_frame_encoding=True, multi_gpu_head = False):
     # Backbone
     backbone_net = backbones.resnet50(pretrained=backbone_pretrained, frozen_layers=frozen_backbone_layers)
 
@@ -115,6 +119,8 @@ def tompnet50(filter_size=4, head_layer='layer3', backbone_pretrained=True, head
     head = heads.Head(filter_predictor=filter_predictor, feature_extractor=head_feature_extractor,
                       classifier=classifier, bb_regressor=bb_regressor)
 
+    if multi_gpu_head:
+        head = MultiGPU(head, dim=1)
     # ToMP network
     net = ToMPnet(feature_extractor=backbone_net, head=head, head_layer=head_layer)
     return net
@@ -159,4 +165,55 @@ def tompnet101(filter_size=1, head_layer='layer3', backbone_pretrained=True, hea
 
     # ToMP network
     net = ToMPnet(feature_extractor=backbone_net, head=head, head_layer=head_layer)
+    return net
+
+
+
+
+@model_constructor
+def temptomp(filter_size=4, head_layer='layer3', backbone_pretrained=True, head_feat_blocks=0, head_feat_norm=True,
+              final_conv=True, out_feature_dim=512, frozen_backbone_layers=(), nhead=8, num_encoder_layers=6,
+              num_decoder_layers=6, dim_feedforward=2048, feature_sz=18, use_test_frame_encoding=True, multi_gpu_head = False):
+    # Backbone
+    print("Loading Resnet50")
+    backbone_net = backbones.resnet50(pretrained=backbone_pretrained, frozen_layers=frozen_backbone_layers)
+
+    # Feature normalization
+    norm_scale = math.sqrt(1.0 / (out_feature_dim * filter_size * filter_size))
+
+    # Classifier features
+    if head_layer == 'layer3':
+        feature_dim = 256
+    elif head_layer == 'layer4':
+        feature_dim = 512
+    else:
+        raise Exception
+
+    head_feature_extractor = clf_features.residual_bottleneck(feature_dim=feature_dim,
+                                                              num_blocks=head_feat_blocks, l2norm=head_feat_norm,
+                                                              final_conv=final_conv, norm_scale=norm_scale,
+                                                              out_dim=out_feature_dim)
+
+    transformer = trans.Transformer(d_model=out_feature_dim, nhead=nhead, num_encoder_layers=num_encoder_layers,
+                                    num_decoder_layers=num_decoder_layers, dim_feedforward=dim_feedforward)
+
+
+    filter_predictor = tfp.FilterPredictorTemporal(transformer, feature_sz=feature_sz,
+                                          use_test_frame_encoding=use_test_frame_encoding)
+
+    classifier = heads.LinearFilterClassifier(num_channels=out_feature_dim)
+
+    bb_regressor = heads.DenseBoxRegressor(num_channels=out_feature_dim)
+
+    print("Creating Head")
+    head = heads.Head(filter_predictor=filter_predictor, feature_extractor=head_feature_extractor,
+                      classifier=classifier, bb_regressor=bb_regressor)
+
+    if multi_gpu_head:
+        head = MultiGPU(head, dim=1)
+        backbone_net = MultiGPU(backbone_net, dim=0)
+    # ToMP network
+    print("Creating ToMPnet")
+    net = ToMPnet(feature_extractor=backbone_net, head=head, head_layer=head_layer)
+    # print("Net created")
     return net

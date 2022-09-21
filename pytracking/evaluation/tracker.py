@@ -2,6 +2,7 @@ import importlib
 import os
 import numpy as np
 from collections import OrderedDict
+from tqdm import tqdm
 from pytracking.evaluation.environment import env_settings
 import time
 import cv2 as cv
@@ -196,7 +197,7 @@ class Tracker:
 
         _store_outputs(out, init_default)
 
-        for frame_num, frame_path in enumerate(seq.frames[1:], start=1):
+        for frame_num, frame_path in tqdm(enumerate(seq.frames[1:], start=1)):
             while True:
                 if not self.pause_mode:
                     break

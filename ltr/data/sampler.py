@@ -1,6 +1,9 @@
 import random
 import torch.utils.data
+
+from ltr.data.processing_utils import gauss_2d
 from pytracking import TensorDict
+import numpy as np
 
 
 def no_processing(data):
@@ -91,6 +94,7 @@ class TrackingSampler(torch.utils.data.Dataset):
         returns:
             TensorDict - dict containing all the data blocks
         """
+        # print("Trying to get a sample")
 
         # Select a dataset
         dataset = random.choices(self.datasets, self.p_datasets)[0]
@@ -156,6 +160,9 @@ class TrackingSampler(torch.utils.data.Dataset):
             train_frame_ids = [1] * self.num_train_frames
             test_frame_ids = [1] * self.num_test_frames
 
+        # print(train_frame_ids)
+        # print(test_frame_ids)
+        # exit(0)
         train_frames, train_anno, meta_obj_train = dataset.get_frames(seq_id, train_frame_ids, seq_info_dict)
         test_frames, test_anno, meta_obj_test = dataset.get_frames(seq_id, test_frame_ids, seq_info_dict)
 
@@ -227,7 +234,7 @@ class LWLSampler(torch.utils.data.Dataset):
 
         # Normalize
         p_total = sum(p_datasets)
-        self.p_datasets = [x/p_total for x in p_datasets]
+        self.p_datasets = [x / p_total for x in p_datasets]
 
         self.samples_per_epoch = samples_per_epoch
         self.max_gap = max_gap
@@ -293,7 +300,8 @@ class LWLSampler(torch.utils.data.Dataset):
             seq_info_dict = dataset.get_sequence_info(seq_id)
             visible = seq_info_dict['visible']
 
-            enough_visible_frames = visible.type(torch.int64).sum().item() > 2 * (self.num_test_frames + self.num_train_frames)
+            enough_visible_frames = visible.type(torch.int64).sum().item() > 2 * (
+                    self.num_test_frames + self.num_train_frames)
 
             enough_visible_frames = enough_visible_frames or not is_video_dataset
 
@@ -309,7 +317,7 @@ class LWLSampler(torch.utils.data.Dataset):
 
                 if not reverse_sequence:
                     base_frame_id = self._sample_visible_ids(visible, num_ids=1, min_id=self.num_train_frames - 1,
-                                                             max_id=len(visible)-self.num_test_frames)
+                                                             max_id=len(visible) - self.num_test_frames)
                     prev_frame_ids = self._sample_visible_ids(visible, num_ids=self.num_train_frames - 1,
                                                               min_id=base_frame_id[0] - self.max_gap - gap_increase,
                                                               max_id=base_frame_id[0])
@@ -317,7 +325,7 @@ class LWLSampler(torch.utils.data.Dataset):
                         gap_increase += 5
                         continue
                     train_frame_ids = base_frame_id + prev_frame_ids
-                    test_frame_ids = self._sample_visible_ids(visible, min_id=train_frame_ids[0]+1,
+                    test_frame_ids = self._sample_visible_ids(visible, min_id=train_frame_ids[0] + 1,
                                                               max_id=train_frame_ids[0] + self.max_gap + gap_increase,
                                                               num_ids=self.num_test_frames)
 
@@ -342,8 +350,8 @@ class LWLSampler(torch.utils.data.Dataset):
                     gap_increase += 5
         else:
             # In case of image dataset, just repeat the image to generate synthetic video
-            train_frame_ids = [1]*self.num_train_frames
-            test_frame_ids = [1]*self.num_test_frames
+            train_frame_ids = [1] * self.num_train_frames
+            test_frame_ids = [1] * self.num_test_frames
 
         # Sort frames
         train_frame_ids = sorted(train_frame_ids, reverse=reverse_sequence)
@@ -399,7 +407,7 @@ class KYSSampler(torch.utils.data.Dataset):
 
         # Normalize
         p_total = sum(p_datasets)
-        self.p_datasets = [x/p_total for x in p_datasets]
+        self.p_datasets = [x / p_total for x in p_datasets]
 
         self.samples_per_epoch = samples_per_epoch
         self.sequence_sample_info = sequence_sample_info
@@ -410,6 +418,7 @@ class KYSSampler(torch.utils.data.Dataset):
     def __len__(self):
         return self.samples_per_epoch
 
+    # randomly choose #num_ids valid frames in the range
     def _sample_ids(self, valid, num_ids=1, min_id=None, max_id=None):
         """ Samples num_ids frames between min_id and max_id for which target is visible
 
@@ -435,6 +444,7 @@ class KYSSampler(torch.utils.data.Dataset):
 
         return random.choices(valid_ids, k=num_ids)
 
+    # starting from frame id #first_occ_frame, find the id of next partially occluded frame
     def find_occlusion_end_frame(self, first_occ_frame, target_not_fully_visible):
         for i in range(first_occ_frame, len(target_not_fully_visible)):
             if not target_not_fully_visible[i]:
@@ -480,6 +490,9 @@ class KYSSampler(torch.utils.data.Dataset):
 
             num_visible = visible.type(torch.int64).sum().item()
 
+            # kalyan-understanding
+            # we are only caring for video datasets (as below code not implemented for non video sequences)
+            # so only the condition after or is evaluated
             enough_visible_frames = not is_video_dataset or (num_visible > min_visible_frames and len(visible) >= 20)
 
             valid_sequence = enough_visible_frames
@@ -543,8 +556,9 @@ class KYSSampler(torch.utils.data.Dataset):
                         test_frame_ids = test_frame_ids + [0] * (num_test_frames - len(test_frame_ids))
                     else:
                         # Make sure target visible in first frame
-                        base_frame_id = self._sample_ids(visible, num_ids=1, min_id=2*num_train_frames,
-                                                         max_id=len(visible) - int(num_test_frames * min_fraction_valid_frames))
+                        base_frame_id = self._sample_ids(visible, num_ids=1, min_id=2 * num_train_frames,
+                                                         max_id=len(visible) - int(
+                                                             num_test_frames * min_fraction_valid_frames))
                         if base_frame_id is None:
                             base_frame_id = 0
                         else:
@@ -565,13 +579,16 @@ class KYSSampler(torch.utils.data.Dataset):
                         test_frame_ids = list(range(base_frame_id, min(len(visible), base_frame_id + num_test_frames)))
                         test_valid_image[:len(test_frame_ids)] = 1
 
-                        test_frame_ids = test_frame_ids + [0]*(num_test_frames - len(test_frame_ids))
+                        test_frame_ids = test_frame_ids + [0] * (num_test_frames - len(test_frame_ids))
             else:
                 raise NotImplementedError
         else:
             raise NotImplementedError
 
         # Get frames
+        # print(dataset.get_name(), seq_id)
+        # print(train_frame_ids)
+        # print(test_frame_ids)
         train_frames, train_anno_dict, _ = dataset.get_frames(seq_id, train_frame_ids, seq_info_dict)
         train_anno = train_anno_dict['bbox']
 
@@ -591,9 +608,105 @@ class KYSSampler(torch.utils.data.Dataset):
                            'test_valid_image': test_valid_image,
                            'test_visible_ratio': test_visible_ratio,
                            'dataset': dataset.get_name()})
-
+        # exit(0)
         # Send for processing
         return self.processing(data)
+
+
+
+class TrajectoryPOCSampler(torch.utils.data.Dataset):
+    def __init__(self, im_shape, samples_per_epoch, traj_disp=None, num_points=6):
+        self.im_shape = torch.tensor(im_shape)
+        self.samples_per_epoch = samples_per_epoch
+        self.num_points = num_points
+        self.traj_disp = traj_disp
+        if traj_disp is None:
+            self.traj_disp = -((-self.im_shape[0] - self.im_shape[1]) // 10)  # ceil((h+w) // 10)
+
+    def __len__(self):
+        return self.samples_per_epoch
+
+    def __is_in__(self, i, j):
+        return 0 <= i < self.im_shape[0] and 0 <= j < self.im_shape[1]
+
+    def __getitem__(self, index):
+        unique_pts = []
+        while len(unique_pts) < self.num_points:
+            pt = ([random.randrange(0, self.im_shape[0]), random.randrange(0, self.im_shape[1])])
+            if pt not in unique_pts:
+                unique_pts.append(pt)
+        mapped_pts = []
+        for pt in unique_pts:
+            new_pt = [random.randrange(max(0, pt[0] - self.traj_disp), min(pt[0] + self.traj_disp, self.im_shape[0])),
+                      random.randrange(max(0, pt[1] - self.traj_disp), min(pt[1] + self.traj_disp, self.im_shape[1]))]
+            mapped_pts.append(new_pt)
+
+        duplicated_traj_code = False
+        traj = [[n[0] - o[0], n[1] - o[1]]*(2 if duplicated_traj_code else 1) for (n, o) in zip(mapped_pts, unique_pts)]
+        im_prev = np.zeros((self.im_shape[0], self.im_shape[1], 3), dtype=np.float64)
+        im_cur = np.zeros((self.im_shape[0], self.im_shape[1], 3), dtype=np.float64)
+        traj_grid = np.zeros((self.im_shape[0], self.im_shape[1], 4 if duplicated_traj_code else 2), dtype=np.float64)
+        # traj_grid[...]=
+        # print(unique_pts)
+        # print(mapped_pts)
+        # print(traj)
+        for pt in unique_pts:
+            im_cur[pt[0], pt[1]] = [1, 0, 0]
+        # im_cur[unique_pts[0][0], unique_pts[0][1]] = [0, 1, 1]
+
+        # im_prev[mapped_pts[0][0], mapped_pts[0][1]] = [1, 1, 0]
+        for pt in mapped_pts:
+            im_prev[pt[0], pt[1]] = [1, 0, 0]
+        center = torch.tensor(mapped_pts[0][::-1])
+        center = center - self.im_shape / 2
+        # print(center)
+        target_marking = gauss_2d(self.im_shape + ((self.im_shape + 1) % 2), float(0.05 * self.im_shape.prod().sqrt().item()),
+                         center.view(-1, 2), (0, 0), density=True)
+        target_marking = target_marking/target_marking.max()
+        im_prev[:,:,1]=target_marking[0, :self.im_shape[0], :self.im_shape[1]].numpy()
+        # print(torch.tensor(unique_pts[0]).view(-1,2), np.sqrt(self.im_shape[0]*self.im_shape[1]))
+        center = torch.tensor(unique_pts[0][::-1])
+        center = center - self.im_shape / 2
+        # print(center)
+        label = gauss_2d(self.im_shape + ((self.im_shape + 1) % 2), float(0.05 * self.im_shape.prod().sqrt().item()),
+                         center.view(-1, 2), (0, 0), density=True)
+        # print(label[0].shape, label.min(), label.max(), label.std(), label.mean())
+        # return
+        for pt, t in zip(unique_pts, traj):
+            traj_grid[pt[0], pt[1]] = t
+        totensor = lambda im: torch.tensor(im.transpose((2, 0, 1)), dtype=torch.float32)
+        tdict =  TensorDict({'current_image': totensor(im_cur), 'previous_image': totensor(im_prev),
+                           'label': torch.tensor(torch.from_numpy(label[0, :self.im_shape[0], :self.im_shape[1]].numpy()), dtype=torch.float32),
+                           'trajectory': totensor(traj_grid)/self.im_shape[:,None,None]})
+        for k in tdict.keys():
+            tdict[k] = tdict[k].unsqueeze(0)
+        # print('label',tdict['label'].shape)
+        return tdict
+
+#
+# import matplotlib.pyplot as plt
+# import os
+# os.environ['KMP_DUPLICATE_LIB_OK']='True'
+#
+# if __name__ == '__main__':
+#     s = TrajectoryPOCSampler((18, 18), 2, traj_disp=5)
+#     while True:
+#         x = s[0]
+#
+#         for k in x.keys():
+#             print(k, x[k].min(), x[k].max(), x[k].shape)
+#         for k in x.keys():
+#             x[k]=x[k].squeeze(0)
+#             if x[k].dim()==3:
+#                 x[k]=x[k].permute(1,2,0)
+#             x[k]=x[k].numpy()
+#         plt.figure()
+#         plt.imshow(np.concatenate([x['current_image']+x['previous_image']+1*np.concatenate([x['label'][..., None]]*3, axis=2)], axis=0))
+#         plt.show()
+#         plt.imshow(x['trajectory'][:,:,0])
+#         plt.show()
+#         plt.imshow(x['trajectory'][:,:,1])
+#         plt.show()
 
 
 class SequentialTargetCandidateMatchingSampler(torch.utils.data.Dataset):
@@ -677,12 +790,11 @@ class SequentialTargetCandidateMatchingSampler(torch.utils.data.Dataset):
         if len(valid_ids) == 0:
             return None
 
-        num_begin = num_ids//2
-        num_end = num_ids - num_ids//2
-        ids_begin = random.sample(valid_ids[:len(valid_ids)//2], k=num_begin)
-        ids_end = random.sample(valid_ids[len(valid_ids)//2:], k=num_end)
+        num_begin = num_ids // 2
+        num_end = num_ids - num_ids // 2
+        ids_begin = random.sample(valid_ids[:len(valid_ids) // 2], k=num_begin)
+        ids_end = random.sample(valid_ids[len(valid_ids) // 2:], k=num_end)
         return ids_begin + ids_end
-
 
     def __getitem__(self, index):
         """
@@ -715,7 +827,6 @@ class SequentialTargetCandidateMatchingSampler(torch.utils.data.Dataset):
             test_frame_ids = [baseframe_id, baseframe_id + 1]
         else:
             raise ValueError('Supervision mode: \'{}\' is invalid.'.format(sup_mode))
-
 
         seq_info_dict = self.dataset.get_sequence_info(seq_id)
 

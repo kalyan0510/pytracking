@@ -868,6 +868,7 @@ class KYSProcessing(BaseProcessing):
                 if self._check_if_crop_inside_image(jittered_box, images[i].shape):
                     break
                 else:
+                    # What is this? if no anno, then some random ly top-left box?
                     jittered_box = torch.tensor([1, 1, 10, 10]).float()
 
             out_boxes.append(jittered_box)
@@ -1441,7 +1442,8 @@ class LTRBDenseRegressionProcessing(BaseProcessing):
 
     def __init__(self, search_area_factor, output_sz, center_jitter_factor, scale_jitter_factor, crop_type='replicate',
                  max_scale_change=None, mode='pair', stride=16, label_function_params=None,
-                 center_sampling_radius=0.0, use_normalized_coords=True, *args, **kwargs):
+                 center_sampling_radius=0.0, use_normalized_coords=True, min_crop_inside_ratio=0,
+                 *args, **kwargs):
         """
         args:
             search_area_factor - The size of the search region  relative to the target size.
@@ -1472,6 +1474,93 @@ class LTRBDenseRegressionProcessing(BaseProcessing):
         self.label_function_params = label_function_params
         self.center_sampling_radius = center_sampling_radius
         self.use_normalized_coords = use_normalized_coords
+        self.min_crop_inside_ratio = min_crop_inside_ratio
+
+    def _smooth_scale_factor_series(self, num_frames, mode, peak_size_variance=0.5, mean_p2p_gap=10, ):
+        y = []
+
+        def smooth(y, box_pts):
+            box = np.ones(box_pts) / box_pts
+            y_smooth = np.convolve(np.pad(y, ((box_pts) // 2, (box_pts - 1) // 2), mode='edge'), box, mode='valid')
+            return y_smooth
+
+        cur_rand = 0
+        i = 0
+        while i < num_frames:
+            target = np.random.normal(0, peak_size_variance, (1))[0]
+            num_steps = int(max(3, np.random.normal(mean_p2p_gap, mean_p2p_gap, size=(1, 1))))
+            # print("steps:", num_steps, (target - cur_rand) / num_steps)
+            for step in [(target - cur_rand) / num_steps] * num_steps:
+                # print(cur_rand, step)
+                cur_scale = np.exp(cur_rand * self.scale_jitter_factor[mode])
+                # x.append(i)
+                y.append(cur_scale)
+                cur_rand += step
+                i = i + 1
+        return torch.tensor(smooth(y, 10)[:num_frames], dtype=torch.float32)  # , device=mask.device)
+
+    def _check_if_crop_inside_image(self, box, im_shape):
+        x, y, w, h = box.tolist()
+
+        if w <= 0.0 or h <= 0.0:
+            return False
+
+        crop_sz = math.ceil(math.sqrt(w * h) * self.search_area_factor)
+
+        x1 = x + 0.5 * w - crop_sz * 0.5
+        x2 = x1 + crop_sz
+
+        y1 = y + 0.5 * h - crop_sz * 0.5
+        y2 = y1 + crop_sz
+
+        w_inside = max(min(x2, im_shape[1]) - max(x1, 0), 0)
+        h_inside = max(min(y2, im_shape[0]) - max(y1, 0), 0)
+
+        crop_area = ((x2 - x1) * (y2 - y1))
+
+        if crop_area > 0:
+            inside_ratio = w_inside * h_inside / crop_area
+            return inside_ratio > self.min_crop_inside_ratio
+        else:
+            return False
+
+    def _generate_synthetic_motion(self, boxes, images, mode):
+        num_frames = len(boxes)
+
+        out_boxes = []
+        scale_factors = self._smooth_scale_factor_series(num_frames, mode)
+        for i in range(num_frames):
+            jittered_box = None
+            for _ in range(10):
+                orig_box = boxes[i]
+                # if self.center_jitter_factor.get(mode + '_mode', 'uniform') == 'uniform':
+                #     max_offset = (jittered_size.prod().sqrt() * self.center_jitter_factor[mode]).item()
+                #     offset_factor = (torch.rand(2) - 0.5)
+                #     jittered_center = orig_box[0:2] + 0.5 * orig_box[2:4] + max_offset * offset_factor
+                #
+                #     if mode=='test' and i > 0:
+                #         prev_out_box_center = out_boxes[-1][:2] + 0.5 * out_boxes[-1][2:]
+                #         if abs(jittered_center[0] - prev_out_box_center[0]) > out_boxes[-1][2:].prod().sqrt() * 0.5:
+                #             jittered_center[0] = orig_box[0] + 0.5 * orig_box[2] + max_offset * offset_factor[0] * -1
+                #
+                #         if abs(jittered_center[1] - prev_out_box_center[1]) > out_boxes[-1][2:].prod().sqrt() * 0.5:
+                #             jittered_center[1] = orig_box[1] + 0.5 * orig_box[3] + max_offset * offset_factor[1] * -1
+                #
+
+                jittered_box = boxes[i-1] if i > 0 else orig_box
+                jittered_size = jittered_box[2:4] * scale_factors[i]
+                center = jittered_box[0:2] + 0.5 * jittered_box[2:4] # + max_offset * offset_factor
+                jittered_box = torch.cat((center - 0.5 * jittered_size, jittered_size), dim=0)
+
+                if self._check_if_crop_inside_image(jittered_box, images[i].shape):
+                    break
+                else:
+                    # What is this? if no anno, then some random ly top-left box?
+                    jittered_box = torch.tensor([1, 1, 10, 10]).float()
+
+            out_boxes.append(jittered_box)
+
+        return out_boxes
 
     def _get_jittered_box(self, box, mode):
         """ Jitter the input box
@@ -1588,7 +1677,11 @@ class LTRBDenseRegressionProcessing(BaseProcessing):
                 "In pair mode, num train/test frames must be 1"
 
             # Add a uniform noise to the center pos
-            jittered_anno = [self._get_jittered_box(a, s) for a in data[s + '_anno']]
+            # jittered_anno = [self._get_jittered_box(a, s) for a in data[s + '_anno']]
+            #kalyan-understanding
+            # dont freak. this is not the anno. This tells what area to crop from, in the input frame
+            jittered_anno = self._generate_synthetic_motion(data[s + '_anno'], data[s + '_images'], s)
+
 
             crops, boxes = prutils.target_image_crop(data[s + '_images'], jittered_anno, data[s + '_anno'],
                                                      self.search_area_factor, self.output_sz, mode=self.crop_type,

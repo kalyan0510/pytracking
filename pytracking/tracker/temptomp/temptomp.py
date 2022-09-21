@@ -13,8 +13,7 @@ import numpy as np
 from collections import defaultdict
 
 
-class ToMP(BaseTracker):
-
+class TempToMP(BaseTracker):
     multiobj_mode = 'parallel'
 
     def initialize_features(self):
@@ -31,6 +30,7 @@ class ToMP(BaseTracker):
 
         # Initialize network
         self.initialize_features()
+        print("Inti features Newtwork")
 
         # The DiMP network
         self.net = self.params.net
@@ -43,7 +43,7 @@ class ToMP(BaseTracker):
 
         # Get target position and size
         state = info['init_bbox']
-        self.pos = torch.Tensor([state[1] + (state[3] - 1)/2, state[0] + (state[2] - 1)/2])
+        self.pos = torch.Tensor([state[1] + (state[3] - 1) / 2, state[0] + (state[2] - 1) / 2])
         self.target_sz = torch.Tensor([state[3], state[2]])
 
         # Get object id
@@ -62,11 +62,11 @@ class ToMP(BaseTracker):
         self.img_support_sz = self.img_sample_sz
         tfs = self.params.get('train_feature_size', 18)
         stride = self.params.get('feature_stride', 16)
-        self.train_img_sample_sz = torch.Tensor([tfs*stride, tfs*stride])
+        self.train_img_sample_sz = torch.Tensor([tfs * stride, tfs * stride])
 
         # Set search area
         search_area = torch.prod(self.target_sz * self.params.search_area_scale).item()
-        self.target_scale =  math.sqrt(search_area) / self.img_sample_sz.prod().sqrt()
+        self.target_scale = math.sqrt(search_area) / self.img_sample_sz.prod().sqrt()
 
         # Target size in base scale
         self.base_target_sz = self.target_sz / self.target_scale
@@ -93,6 +93,10 @@ class ToMP(BaseTracker):
         self.target_not_found_counter = 0
 
         self.cls_weights_avg = None
+
+        self.temporal_features = {}  # 'feats': None, 'labels': None, 'ltrb': None ,'mask': None
+        self.max_temp_frames = self.params.num_temporal_frames
+        self.feature_select_th = self.params.feature_select_threshold
 
         out = {'time': time.time() - tic}
         # self.print_t_dict(self.params.__dict__, "SELF PARAMS")
@@ -148,6 +152,7 @@ class ToMP(BaseTracker):
                 return f"[Tensor]{x}: {y.shape} , mean:{y.mean():.4f}, min:{y.min():.4f}, max:{y.max():.4f}, contiguous: {y.is_contiguous()}, has_grad: {y.requires_grad, y.grad_fn}"
             else:
                 return f"[Tensor]{x}: {y.shape} , mean:-----, min:-----, max:-----, contiguous: {y.is_contiguous()}, has_grad: {y.requires_grad, y.grad_fn}"
+
         print(s)
         for k in inp_dict.keys():
             # print(k, type(inp_dict[k]), inp_dict[k])
@@ -176,8 +181,8 @@ class ToMP(BaseTracker):
 
         # Extract backbone features
         backbone_feat, sample_coords, im_patches = self.extract_backbone_features(im, self.get_centered_sample_pos(),
-                                                                      self.target_scale * self.params.scale_factors,
-                                                                      self.img_sample_sz)
+                                                                                  self.target_scale * self.params.scale_factors,
+                                                                                  self.img_sample_sz)
         # Extract classification features
         test_x = self.get_backbone_head_feat(backbone_feat)
 
@@ -185,7 +190,7 @@ class ToMP(BaseTracker):
         sample_pos, sample_scales = self.get_sample_location(sample_coords)
 
         # Compute classification scores
-        scores_raw, bbox_preds = self.classify_target(test_x)
+        scores_raw, bbox_preds, test_feat = self.classify_target(test_x)
 
         translation_vec, scale_ind, s, flag, score_loc = self.localize_target(scores_raw, sample_pos, sample_scales)
 
@@ -193,7 +198,7 @@ class ToMP(BaseTracker):
         bbox = self.clip_bbox_to_image_area(bbox_raw, image)
 
         if flag != 'not_found':
-            self.pos = bbox[:2].flip(0) + bbox[2:].flip(0)/2  # [y + h/2, x + w/2]
+            self.pos = bbox[:2].flip(0) + bbox[2:].flip(0) / 2  # [y + h/2, x + w/2]
             self.target_sz = bbox[2:].flip(0)
             self.target_scale = torch.sqrt(self.target_sz.prod() / self.base_target_sz.prod())
             self.target_scales.append(self.target_scale)
@@ -208,12 +213,14 @@ class ToMP(BaseTracker):
         hard_negative = (flag == 'hard_negative')
         learning_rate = self.params.get('hard_negative_learning_rate', None) if hard_negative else None
 
-        if update_flag and self.params.get('update_classifier', False) and scores_raw.max() > self.params.get('conf_ths', 0.0):
+        if update_flag and self.params.get('update_classifier', False) and scores_raw.max() > self.params.get(
+                'conf_ths', 0.0):
             # Get train sample
-            train_x = test_x[scale_ind:scale_ind+1, ...]
+            train_x = test_x[scale_ind:scale_ind + 1, ...]
 
             # Create target_box and label for spatial sample
-            target_box = self.get_iounet_box(self.pos, self.target_sz, sample_pos[scale_ind,:], sample_scales[scale_ind])
+            target_box = self.get_iounet_box(self.pos, self.target_sz, sample_pos[scale_ind, :],
+                                             sample_scales[scale_ind])
             train_y = self.get_label_function(self.pos, sample_pos[scale_ind, :], sample_scales[scale_ind]).to(
                 self.params.device)
 
@@ -226,7 +233,8 @@ class ToMP(BaseTracker):
         new_state = torch.cat((self.pos[[1, 0]] - (self.target_sz[[1, 0]] - 1) / 2, self.target_sz[[1, 0]]))
 
         # Visualize and set debug info
-        self.search_area_box = torch.cat((sample_coords[0,[1,0]], sample_coords[0,[3,2]] - sample_coords[0,[1,0]] - 1))
+        self.search_area_box = torch.cat(
+            (sample_coords[0, [1, 0]], sample_coords[0, [3, 2]] - sample_coords[0, [1, 0]] - 1))
 
         if self.params.get('output_not_found_box', False):
             output_state = [-1, -1, -1, -1]
@@ -238,7 +246,9 @@ class ToMP(BaseTracker):
 
         if self.visdom is not None:
             self.visualize_raw_results(score_map)
+            self.visualize_inputs(im_patches)
         # self.print_t_dict(self.__dict__)
+        self.update_temporal_feat(test_feat, s.unsqueeze(0) if getattr(self.params, 'use_processed_scores', False) else scores_raw, bbox_preds)
         return out
 
     def visualize_raw_results(self, score_map):
@@ -247,6 +257,10 @@ class ToMP(BaseTracker):
         self.visdom.register(torch.tensor(self.logging_dict['max_score']), 'lineplot', 3, 'Max Score')
         self.debug_info['max_score'] = score_map.max().item()
         self.visdom.register(self.debug_info, 'info_dict', 1, 'Status')
+
+    def visualize_inputs(self, im_patches):
+        self.visdom.register(im_patches[0], 'image', 2, 'Input' + self.id_str)
+
 
     def direct_bbox_regression(self, bbox_preds, sample_coords, score_loc, scores_raw):
         shifts_x = torch.arange(
@@ -266,17 +280,21 @@ class ToMP(BaseTracker):
         xs = xs.reshape(s1, s2)
         ys = ys.reshape(s1, s2)
 
-        ltrb = bbox_preds.permute(0,1,3,4,2)[0,0].cpu() * self.train_img_sample_sz[[0, 1, 0, 1]]
+        ltrb = bbox_preds.permute(0, 1, 3, 4, 2)[0, 0].cpu() * self.train_img_sample_sz[[0, 1, 0, 1]]
         xs1 = xs - ltrb[:, :, 0]
         xs2 = xs + ltrb[:, :, 2]
         ys1 = ys - ltrb[:, :, 1]
         ys2 = ys + ltrb[:, :, 3]
         sl = score_loc.int()
 
-        x1 = xs1[sl[0], sl[1]] / self.img_sample_sz[1] * (sample_coords[0, 3] - sample_coords[0, 1]) + sample_coords[0, 1]
-        y1 = ys1[sl[0], sl[1]] / self.img_sample_sz[0] * (sample_coords[0, 2] - sample_coords[0, 0]) + sample_coords[0, 0]
-        x2 = xs2[sl[0], sl[1]] / self.img_sample_sz[1] * (sample_coords[0, 3] - sample_coords[0, 1]) + sample_coords[0, 1]
-        y2 = ys2[sl[0], sl[1]] / self.img_sample_sz[0] * (sample_coords[0, 2] - sample_coords[0, 0]) + sample_coords[0, 0]
+        x1 = xs1[sl[0], sl[1]] / self.img_sample_sz[1] * (sample_coords[0, 3] - sample_coords[0, 1]) + sample_coords[
+            0, 1]
+        y1 = ys1[sl[0], sl[1]] / self.img_sample_sz[0] * (sample_coords[0, 2] - sample_coords[0, 0]) + sample_coords[
+            0, 0]
+        x2 = xs2[sl[0], sl[1]] / self.img_sample_sz[1] * (sample_coords[0, 3] - sample_coords[0, 1]) + sample_coords[
+            0, 1]
+        y2 = ys2[sl[0], sl[1]] / self.img_sample_sz[0] * (sample_coords[0, 2] - sample_coords[0, 0]) + sample_coords[
+            0, 0]
         w = x2 - x1
         h = y2 - y1
 
@@ -288,22 +306,41 @@ class ToMP(BaseTracker):
             self.target_not_found_counter += 1
             num_scales = max(min_scales, min(max_scales, self.target_not_found_counter))
             target_scales = torch.tensor(self.target_scales)[-max_history:]
-            target_scales = target_scales[target_scales >= target_scales[-1]]  # only boxes that are bigger than the `not found`
+            target_scales = target_scales[
+                target_scales >= target_scales[-1]]  # only boxes that are bigger than the `not found`
             target_scales = target_scales[-num_scales:]  # look as many samples into past as not found endures.
             # so we dont look at all the scales but the average of prev. bigger scales. So, we work only on one scale at a time
-            self.target_scale = torch.mean(target_scales) # average bigger boxes from the past
+            self.target_scale = torch.mean(target_scales)  # average bigger boxes from the past
 
     def get_sample_location(self, sample_coord):
         """Get the location of the extracted sample."""
         sample_coord = sample_coord.float()
-        sample_pos = 0.5*(sample_coord[:,:2] + sample_coord[:,2:] - 1)
-        sample_scales = ((sample_coord[:,2:] - sample_coord[:,:2]) / self.img_sample_sz).prod(dim=1).sqrt()
+        sample_pos = 0.5 * (sample_coord[:, :2] + sample_coord[:, 2:] - 1)
+        sample_scales = ((sample_coord[:, 2:] - sample_coord[:, :2]) / self.img_sample_sz).prod(dim=1).sqrt()
         return sample_pos, sample_scales
 
     def get_centered_sample_pos(self):
         """Get the center position for the new sample. Make sure the target is correctly centered."""
         return self.pos + ((self.feature_sz + self.kernel_size) % 2) * self.target_scale * \
-               self.img_support_sz / (2*self.feature_sz)
+               self.img_support_sz / (2 * self.feature_sz)
+
+    def packed_temporal_feat(self, device):
+        if self.temporal_features.get('feats', None) is None or self.max_temp_frames == 0:
+            return None
+        # pack and return tensor
+        temp_dict = {k: torch.concat(v, dim=0).to(device) for (k, v) in self.temporal_features.items()}
+        temp_dict['feats'] = temp_dict['feats'].unsqueeze(1)
+        return temp_dict
+
+    def update_temporal_feat(self, feat, scores, ltrb):
+        self.temporal_features['feats'] = self.temporal_features.get('feats', []) + [feat]
+        self.temporal_features['labels'] = self.temporal_features.get('labels', []) + [scores]
+        self.temporal_features['ltrb'] = self.temporal_features.get('ltrb', []) + [ltrb]
+        self.temporal_features['mask'] = self.temporal_features.get('mask', []) + [scores > 0.3]
+        if len(self.temporal_features.get('feats', [])) > self.max_temp_frames:
+            for v in self.temporal_features.values():
+                v.pop(0)
+        return self.temporal_features
 
     def classify_target(self, sample_x: TensorList):
         """Classify target by applying the DiMP filter."""
@@ -317,8 +354,12 @@ class ToMP(BaseTracker):
 
             train_ltrb = self.encode_bbox(target_boxes)
             cls_weights, bbreg_weights, cls_test_feat_enc, bbreg_test_feat_enc = \
-                self.net.head.get_filter_and_features_in_parallel(train_feat, test_feat, num_gth_frames=self.num_gth_frames,
-                                                                  train_label=target_labels, train_ltrb_target=train_ltrb)
+                self.net.head.get_filter_and_features_in_parallel(train_feat, test_feat,
+                                                                  num_gth_frames=self.num_gth_frames,
+                                                                  train_label=target_labels,
+                                                                  train_ltrb_target=train_ltrb,
+                                                                  temporal_features=self.packed_temporal_feat(train_feat.device),
+                                                                  misplaced_train_frame_pos=getattr(self.params, 'misplaced_train_frame_pos', False))
 
             # fuse encoder and decoder features to one feature map
             target_scores = self.net.head.classifier(cls_test_feat_enc, cls_weights)
@@ -326,7 +367,7 @@ class ToMP(BaseTracker):
             # compute the final prediction using the output module
             bbox_preds = self.net.head.bb_regressor(bbreg_test_feat_enc, bbreg_weights)
 
-        return target_scores, bbox_preds
+        return target_scores, bbox_preds, test_feat
 
     def localize_target(self, scores, sample_pos, sample_scales):
         """Run the target localization."""
@@ -349,18 +390,19 @@ class ToMP(BaseTracker):
         score_filter_ksz = self.params.get('score_filter_ksz', 1)
         if score_filter_ksz > 1:
             assert score_filter_ksz % 2 == 1
-            kernel = scores.new_ones(1,1,score_filter_ksz,score_filter_ksz)
-            scores = F.conv2d(scores.view(-1,1,*scores.shape[-2:]), kernel, padding=score_filter_ksz//2).view(scores.shape)
+            kernel = scores.new_ones(1, 1, score_filter_ksz, score_filter_ksz)
+            scores = F.conv2d(scores.view(-1, 1, *scores.shape[-2:]), kernel, padding=score_filter_ksz // 2).view(
+                scores.shape)
 
         if self.params.get('advanced_localization', False):
             return self.localize_advanced(scores, sample_pos, sample_scales)
 
         # Get maximum
         score_sz = torch.Tensor(list(scores.shape[-2:]))
-        score_center = (score_sz - 1)/2
+        score_center = (score_sz - 1) / 2
         max_score, max_disp = dcf.max2d(scores)
         _, scale_ind = torch.max(max_score, dim=0)
-        max_disp = max_disp[scale_ind,...].float().cpu().view(-1)
+        max_disp = max_disp[scale_ind, ...].float().cpu().view(-1)
         target_disp = max_disp - score_center
 
         # Compute translation vector and scale change factor
@@ -375,7 +417,7 @@ class ToMP(BaseTracker):
         sz = scores.shape[-2:]
         score_sz = torch.Tensor(list(sz))
         output_sz = score_sz - (self.kernel_size + 1) % 2
-        score_center = (score_sz - 1)/2
+        score_center = (score_sz - 1) / 2
 
         scores_hn = scores
         if self.output_window is not None and self.params.get('perform_hn_without_windowing', False):
@@ -386,7 +428,7 @@ class ToMP(BaseTracker):
         _, scale_ind = torch.max(max_score1, dim=0)
         sample_scale = sample_scales[scale_ind]
         max_score1 = max_score1[scale_ind]
-        max_disp1 = max_disp1[scale_ind,...].float().cpu().view(-1)
+        max_disp1 = max_disp1[scale_ind, ...].float().cpu().view(-1)
         target_disp1 = max_disp1 - score_center
         translation_vec1 = target_disp1 * (self.img_support_sz / output_sz) * sample_scale
 
@@ -398,14 +440,15 @@ class ToMP(BaseTracker):
             return translation_vec1, scale_ind, scores_hn, 'hard_negative', max_disp1
 
         # Mask out target neighborhood
-        target_neigh_sz = self.params.target_neighborhood_scale * (self.target_sz / sample_scale) * (output_sz / self.img_support_sz)
+        target_neigh_sz = self.params.target_neighborhood_scale * (self.target_sz / sample_scale) * (
+                    output_sz / self.img_support_sz)
 
         tneigh_top = max(round(max_disp1[0].item() - target_neigh_sz[0].item() / 2), 0)
         tneigh_bottom = min(round(max_disp1[0].item() + target_neigh_sz[0].item() / 2 + 1), sz[0])
         tneigh_left = max(round(max_disp1[1].item() - target_neigh_sz[1].item() / 2), 0)
         tneigh_right = min(round(max_disp1[1].item() + target_neigh_sz[1].item() / 2 + 1), sz[1])
         scores_masked = scores_hn[scale_ind:scale_ind + 1, ...].clone()
-        scores_masked[...,tneigh_top:tneigh_bottom,tneigh_left:tneigh_right] = 0
+        scores_masked[..., tneigh_top:tneigh_bottom, tneigh_left:tneigh_right] = 0
 
         # Find new maximum
         max_score2, max_disp2 = dcf.max2d(scores_masked)
@@ -413,12 +456,12 @@ class ToMP(BaseTracker):
         target_disp2 = max_disp2 - score_center
         translation_vec2 = target_disp2 * (self.img_support_sz / output_sz) * sample_scale
 
-        prev_target_vec = (self.pos - sample_pos[scale_ind,:]) / ((self.img_support_sz / output_sz) * sample_scale)
+        prev_target_vec = (self.pos - sample_pos[scale_ind, :]) / ((self.img_support_sz / output_sz) * sample_scale)
 
         # Handle the different cases
         if max_score2 > self.params.distractor_threshold * max_score1:
-            disp_norm1 = torch.sqrt(torch.sum((target_disp1-prev_target_vec)**2))
-            disp_norm2 = torch.sqrt(torch.sum((target_disp2-prev_target_vec)**2))
+            disp_norm1 = torch.sqrt(torch.sum((target_disp1 - prev_target_vec) ** 2))
+            disp_norm2 = torch.sqrt(torch.sum((target_disp2 - prev_target_vec) ** 2))
             disp_threshold = self.params.dispalcement_scale * math.sqrt(sz[0] * sz[1]) / 2
 
             if disp_norm2 > disp_threshold and disp_norm1 < disp_threshold:
@@ -439,7 +482,8 @@ class ToMP(BaseTracker):
     def extract_backbone_features(self, im: torch.Tensor, pos: torch.Tensor, scales, sz: torch.Tensor):
         im_patches, patch_coords = sample_patch_multiscale(im, pos, scales, sz,
                                                            mode=self.params.get('border_mode', 'replicate'),
-                                                           max_scale_change=self.params.get('patch_max_scale_change', None))
+                                                           max_scale_change=self.params.get('patch_max_scale_change',
+                                                                                            None))
         with torch.no_grad():
             backbone_feat = self.net.extract_backbone(im_patches)
         return backbone_feat, patch_coords, im_patches
@@ -488,7 +532,8 @@ class ToMP(BaseTracker):
         get_rand_shift = lambda: None
         random_shift_factor = self.params.get('random_shift_factor', 0)
         if random_shift_factor > 0:
-            get_rand_shift = lambda: ((torch.rand(2) - 0.5) * self.img_sample_sz * random_shift_factor + global_shift).long().tolist()
+            get_rand_shift = lambda: (
+                        (torch.rand(2) - 0.5) * self.img_sample_sz * random_shift_factor + global_shift).long().tolist()
 
         # Always put identity transformation first, since it is the unaugmented sample that is always used
         self.transforms = [augmentation.Identity(aug_output_sz, global_shift.long().tolist())]
@@ -497,21 +542,29 @@ class ToMP(BaseTracker):
 
         # Add all augmentations
         if 'shift' in augs:
-            self.transforms.extend([augmentation.Translation(shift, aug_output_sz, global_shift.long().tolist()) for shift in augs['shift']])
+            self.transforms.extend(
+                [augmentation.Translation(shift, aug_output_sz, global_shift.long().tolist()) for shift in
+                 augs['shift']])
         if 'relativeshift' in augs:
-            get_absolute = lambda shift: (torch.Tensor(shift) * self.img_sample_sz/2).long().tolist()
-            self.transforms.extend([augmentation.Translation(get_absolute(shift), aug_output_sz, global_shift.long().tolist()) for shift in augs['relativeshift']])
+            get_absolute = lambda shift: (torch.Tensor(shift) * self.img_sample_sz / 2).long().tolist()
+            self.transforms.extend(
+                [augmentation.Translation(get_absolute(shift), aug_output_sz, global_shift.long().tolist()) for shift in
+                 augs['relativeshift']])
         if 'fliplr' in augs and augs['fliplr']:
             self.transforms.append(augmentation.FlipHorizontal(aug_output_sz, get_rand_shift()))
         if 'blur' in augs:
-            self.transforms.extend([augmentation.Blur(sigma, aug_output_sz, get_rand_shift()) for sigma in augs['blur']])
+            self.transforms.extend(
+                [augmentation.Blur(sigma, aug_output_sz, get_rand_shift()) for sigma in augs['blur']])
         if 'scale' in augs:
-            self.transforms.extend([augmentation.Scale(scale_factor, aug_output_sz, get_rand_shift()) for scale_factor in augs['scale']])
+            self.transforms.extend(
+                [augmentation.Scale(scale_factor, aug_output_sz, get_rand_shift()) for scale_factor in augs['scale']])
         if 'rotate' in augs:
-            self.transforms.extend([augmentation.Rotate(angle, aug_output_sz, get_rand_shift()) for angle in augs['rotate']])
+            self.transforms.extend(
+                [augmentation.Rotate(angle, aug_output_sz, get_rand_shift()) for angle in augs['rotate']])
 
         # Extract augmented image patches
-        im_patches = sample_patch_transformed(im, self.init_sample_pos, self.init_sample_scale, aug_expansion_sz, self.transforms)
+        im_patches = sample_patch_transformed(im, self.init_sample_pos, self.init_sample_scale, aug_expansion_sz,
+                                              self.transforms)
 
         # Extract initial backbone features
         with torch.no_grad():
@@ -521,13 +574,14 @@ class ToMP(BaseTracker):
 
     def init_target_boxes(self):
         """Get the target bounding boxes for the initial augmented samples."""
-        self.classifier_target_box = self.get_iounet_box(self.pos, self.target_sz, self.init_sample_pos, self.init_sample_scale)
+        self.classifier_target_box = self.get_iounet_box(self.pos, self.target_sz, self.init_sample_pos,
+                                                         self.init_sample_scale)
         init_target_boxes = TensorList()
         for T in self.transforms:
             init_target_boxes.append(self.classifier_target_box + torch.Tensor([T.shift[1], T.shift[0], 0, 0]))
         init_target_boxes = torch.cat(init_target_boxes.view(1, 4), 0).to(self.params.device)
         self.target_boxes = init_target_boxes.new_zeros(self.params.sample_memory_size, 4)
-        self.target_boxes[:init_target_boxes.shape[0],:] = init_target_boxes
+        self.target_boxes[:init_target_boxes.shape[0], :] = init_target_boxes
         return init_target_boxes
 
     def init_target_labels(self, train_x: TensorList):
@@ -536,8 +590,10 @@ class ToMP(BaseTracker):
                                                      x.shape[3] + (int(self.kernel_size[1].item()) + 1) % 2)
                                          for x in train_x])
         # Output sigma factor
-        output_sigma_factor = self.params.get('output_sigma_factor', 1/4)
-        self.sigma = (self.feature_sz / self.img_support_sz * self.base_target_sz).prod().sqrt() * output_sigma_factor * torch.ones(2)
+        output_sigma_factor = self.params.get('output_sigma_factor', 1 / 4)
+        self.sigma = (
+                                 self.feature_sz / self.img_support_sz * self.base_target_sz).prod().sqrt() * output_sigma_factor * torch.ones(
+            2)
 
         # Center pos in normalized img_coords
         target_center_norm = (self.pos - self.init_sample_pos) / (self.init_sample_scale * self.img_support_sz)
@@ -547,7 +603,8 @@ class ToMP(BaseTracker):
             center_pos = self.feature_sz * target_center_norm + 0.5 * ksz_even
             for i, T in enumerate(self.transforms[:x.shape[0]]):
                 sample_center = center_pos + torch.Tensor(T.shift) / self.img_support_sz * self.feature_sz
-                target[i, 0, ...] = dcf.label_function_spatial(self.feature_sz, self.sigma, sample_center, end_pad=ksz_even)
+                target[i, 0, ...] = dcf.label_function_spatial(self.feature_sz, self.sigma, sample_center,
+                                                               end_pad=ksz_even)
 
         return self.target_labels[0][:train_x[0].shape[0]]
 
@@ -568,30 +625,33 @@ class ToMP(BaseTracker):
             [x.new_zeros(self.params.sample_memory_size, x.shape[1], x.shape[2], x.shape[3]) for x in train_x])
 
         for ts, x in zip(self.training_samples, train_x):
-            ts[:x.shape[0],...] = x
+            ts[:x.shape[0], ...] = x
 
-    def update_memory(self, sample_x: TensorList, sample_y: TensorList, target_box, learning_rate = None):
+    def update_memory(self, sample_x: TensorList, sample_y: TensorList, target_box, learning_rate=None):
         # Update weights and get replace ind
-        replace_ind = self.update_sample_weights(self.sample_weights, self.previous_replace_ind, self.num_stored_samples, self.num_init_samples, learning_rate)
+        replace_ind = self.update_sample_weights(self.sample_weights, self.previous_replace_ind,
+                                                 self.num_stored_samples, self.num_init_samples, learning_rate)
         # print("replace_ind", replace_ind)
         self.previous_replace_ind = replace_ind
 
         # Update sample and label memory
         for train_samp, x, ind in zip(self.training_samples, sample_x, replace_ind):
-            train_samp[ind:ind+1,...] = x
+            train_samp[ind:ind + 1, ...] = x
 
         for y_memory, y, ind in zip(self.target_labels, sample_y, replace_ind):
-            y_memory[ind:ind+1,...] = y
+            y_memory[ind:ind + 1, ...] = y
 
         # Update bb memory
-        self.target_boxes[replace_ind[0],:] = target_box
+        self.target_boxes[replace_ind[0], :] = target_box
 
         self.num_stored_samples += 1
 
-    def update_sample_weights(self, sample_weights, previous_replace_ind, num_stored_samples, num_init_samples, learning_rate = None):
+    def update_sample_weights(self, sample_weights, previous_replace_ind, num_stored_samples, num_init_samples,
+                              learning_rate=None):
         # Update weights and get index to replace
         replace_ind = []
-        for sw, prev_ind, num_samp, num_init in zip(sample_weights, previous_replace_ind, num_stored_samples, num_init_samples):
+        for sw, prev_ind, num_samp, num_init in zip(sample_weights, previous_replace_ind, num_stored_samples,
+                                                    num_init_samples):
             lr = learning_rate
             if lr is None:
                 lr = self.params.learning_rate
@@ -636,12 +696,12 @@ class ToMP(BaseTracker):
 
         for sig, sz, ksz in zip([self.sigma], [self.feature_sz], [self.kernel_size]):
             ksz_even = torch.Tensor([(self.kernel_size[0] + 1) % 2, (self.kernel_size[1] + 1) % 2])
-            center = sz * target_center_norm + 0.5*ksz_even
+            center = sz * target_center_norm + 0.5 * ksz_even
             train_y.append(dcf.label_function_spatial(sz, sig, center, end_pad=ksz_even))
 
         return train_y
 
-    def update_state(self, new_pos, new_scale = None):
+    def update_state(self, new_pos, new_scale=None):
         # Update scale
         if new_scale is not None:
             self.target_scale = new_scale.clamp(self.min_scale_factor, self.max_scale_factor)
@@ -667,20 +727,22 @@ class ToMP(BaseTracker):
         # Add the dropout augmentation here, since it requires extraction of the classification features
         if 'dropout' in self.params.augmentation and self.params.get('use_augmentation', True):
             num, prob = self.params.augmentation['dropout']
-            self.transforms.extend(self.transforms[:1]*num)
-            x = torch.cat([x, F.dropout2d(x[0:1,...].expand(num,-1,-1,-1), p=prob, training=True)])
+            self.transforms.extend(self.transforms[:1] * num)
+            x = torch.cat([x, F.dropout2d(x[0:1, ...].expand(num, -1, -1, -1), p=prob, training=True)])
 
         # Set feature size and other related sizes
         self.feature_sz = torch.Tensor(list(x.shape[-2:]))
         ksz = getattr(self.net.head.filter_predictor, 'filter_size', 1)
         self.kernel_size = torch.Tensor([ksz, ksz] if isinstance(ksz, (int, float)) else ksz)
-        self.output_sz = self.feature_sz + (self.kernel_size + 1)%2
+        self.output_sz = self.feature_sz + (self.kernel_size + 1) % 2
 
         # Construct output window
         self.output_window = None
         if self.params.get('window_output', False):
             if self.params.get('use_clipped_window', False):
-                self.output_window = dcf.hann2d_clipped(self.output_sz.long(), (self.output_sz*self.params.effective_search_area / self.params.search_area_scale).long(), centered=True).to(self.params.device)
+                self.output_window = dcf.hann2d_clipped(self.output_sz.long(), (
+                            self.output_sz * self.params.effective_search_area / self.params.search_area_scale).long(),
+                                                        centered=True).to(self.params.device)
             else:
                 self.output_window = dcf.hann2d(self.output_sz.long(), centered=True).to(self.params.device)
             self.output_window = self.output_window.squeeze(0)
@@ -703,6 +765,6 @@ class ToMP(BaseTracker):
 
     def visdom_draw_tracking(self, image, box, segmentation=None):
         if hasattr(self, 'search_area_box'):
-                self.visdom.register((image, box, self.search_area_box), 'Tracking', 1, 'Tracking')
+            self.visdom.register((image, box, self.search_area_box), 'Tracking', 1, 'Tracking')
         else:
             self.visdom.register((image, box), 'Tracking', 1, 'Tracking')

@@ -57,18 +57,21 @@ class BaseTrainer:
             fail_safe - Bool indicating whether the training to automatically restart in case of any crashes.
         """
 
+        # with torch.autograd.set_detect_anomaly(True):
+        #print(self.epoch, max_epochs)
         epoch = -1
-        num_tries = 10
+        num_tries = 5
         for i in range(num_tries):
             try:
                 if load_latest:
-                    self.load_checkpoint()
+                    self.load_checkpoint(checkpoint=self.settings.start_epoch, modify_net_state_dict=((lambda x:x) if (i!=0 and self.epoch!=0) else getattr(self.settings, 'modify_net_state_dict', lambda x:x)))
+
+                print(f" starting epoch: {self.epoch} out of total: {max_epochs}")
 
                 for epoch in range(self.epoch+1, max_epochs+1):
                     self.epoch = epoch
 
                     self.train_epoch()
-
                     if self.lr_scheduler is not None:
                         self.lr_scheduler.step()
 
@@ -94,11 +97,12 @@ class BaseTrainer:
 
     def save_checkpoint(self):
         """Saves a checkpoint of the network and other variables."""
-
+        print("Saving checkpoint")
         net = self.actor.net.module if multigpu.is_multi_gpu(self.actor.net) else self.actor.net
 
         actor_type = type(self.actor).__name__
         net_type = type(net).__name__
+        self.settings.modify_net_state_dict = None
         state = {
             'epoch': self.epoch,
             'actor_type': actor_type,
@@ -124,9 +128,10 @@ class BaseTrainer:
 
         # Now rename to actual checkpoint. os.rename seems to be atomic if files are on same filesystem. Not 100% sure
         os.rename(tmp_file_path, file_path)
+        print(f"Checkpoint saved to: {file_path}")
 
 
-    def load_checkpoint(self, checkpoint = None, fields = None, ignore_fields = None, load_constructor = False):
+    def load_checkpoint(self, checkpoint = None, fields = None, ignore_fields = None, load_constructor = False, modify_net_state_dict = lambda x:x):
         """Loads a network checkpoint file.
 
         Can be called in three different ways:
@@ -137,7 +142,7 @@ class BaseTrainer:
             load_checkpoint(path_to_checkpoint):
                 Loads the file from the given absolute path (str).
         """
-
+        print('Searching for saved checkpoints')
         net = self.actor.net.module if multigpu.is_multi_gpu(self.actor.net) else self.actor.net
 
         actor_type = type(self.actor).__name__
@@ -150,7 +155,7 @@ class BaseTrainer:
             if checkpoint_list:
                 checkpoint_path = checkpoint_list[-1]
             else:
-                print('No matching checkpoint file found')
+                print('No matching checkpoint file found ...')
                 return
         elif isinstance(checkpoint, int):
             # Checkpoint is the epoch number
@@ -169,6 +174,7 @@ class BaseTrainer:
         else:
             raise TypeError
 
+        print(f'Trying to load checkpoint at {checkpoint_path}')
         # Load network
         checkpoint_dict = loading.torch_load_legacy(checkpoint_path)
 
@@ -187,7 +193,10 @@ class BaseTrainer:
             if key in ignore_fields:
                 continue
             if key == 'net':
-                net.load_state_dict(checkpoint_dict[key])
+                # print(type(checkpoint_dict['net']))
+                # print(len(checkpoint_dict['net'].keys()))
+                # print([k for k in checkpoint_dict['net'].keys()])
+                net.load_state_dict(modify_net_state_dict(checkpoint_dict[key]))
             elif key == 'optimizer':
                 self.optimizer.load_state_dict(checkpoint_dict[key])
             else:
@@ -199,8 +208,10 @@ class BaseTrainer:
         if 'net_info' in checkpoint_dict and checkpoint_dict['net_info'] is not None:
             net.info = checkpoint_dict['net_info']
 
+        # self.epoch = self.settings.start_epoch
+        # self.epoch = 0
         # Update the epoch in lr scheduler
         if 'epoch' in fields:
             self.lr_scheduler.last_epoch = self.epoch
-
+        print('Checkpoint successfully loaded')
         return True

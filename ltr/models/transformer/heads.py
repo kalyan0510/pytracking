@@ -25,19 +25,32 @@ class Head(nn.Module):
         self.bb_regressor = bb_regressor
         self.separate_filters_for_cls_and_bbreg = separate_filters_for_cls_and_bbreg
 
-    def forward(self, train_feat, test_feat, train_bb, *args, **kwargs):
-        assert train_bb.dim() == 3
+    def forward(self, train_feat, test_feat, train_bb=None, batch_sz=None, extract_head_feat=True, no_bbox=False, extract_head_feat_only=False, *args, **kwargs):
+        if extract_head_feat:
+            if no_bbox:
+                assert train_feat.dim()==5
+                num_sequences = train_feat.shape[1]
+            else:
+                if train_bb is not None and train_bb.dim() == 3:
+                    num_sequences = train_bb.shape[1]
+                else:
+                    num_sequences = batch_sz
+            # print("num_seq": num_sequences)
+            # print("head0:train_feat", train_feat.shape)
+            # print("head0:test_feat", test_feat.shape)
 
-        num_sequences = train_bb.shape[1]
+            if train_feat.dim() == 5:
+                train_feat = train_feat.reshape(-1, *train_feat.shape[-3:])
+            if test_feat.dim() == 5:
+                test_feat = test_feat.reshape(-1, *test_feat.shape[-3:])
 
-        if train_feat.dim() == 5:
-            train_feat = train_feat.reshape(-1, *train_feat.shape[-3:])
-        if test_feat.dim() == 5:
-            test_feat = test_feat.reshape(-1, *test_feat.shape[-3:])
-
-        # Extract features
-        train_feat = self.extract_head_feat(train_feat, num_sequences)
-        test_feat = self.extract_head_feat(test_feat, num_sequences)
+            # print("head1:train_feat", train_feat.shape)
+            # print("head1:test_feat", test_feat.shape)
+            # Extract features
+            train_feat = self.extract_head_feat(train_feat, num_sequences, batch_sz == 'for_multi_gpu')
+            test_feat = self.extract_head_feat(test_feat, num_sequences, batch_sz == 'for_multi_gpu')
+            if extract_head_feat_only:
+                return train_feat, test_feat
 
         # Train filter
         cls_filter, breg_filter, test_feat_enc = self.get_filter_and_features(train_feat, test_feat, *args, **kwargs)
@@ -45,19 +58,26 @@ class Head(nn.Module):
         # fuse encoder and decoder features to one feature map
         target_scores = self.classifier(test_feat_enc, cls_filter)
 
+        if no_bbox:
+            return target_scores
+
         # compute the final prediction using the output module
         bbox_preds = self.bb_regressor(test_feat_enc, breg_filter)
 
         return target_scores, bbox_preds
 
-    def extract_head_feat(self, feat, num_sequences=None):
+    def extract_head_feat(self, feat, num_sequences=None, unit_1st_dim=False):
         """Extract classification features based on the input backbone features."""
+        # print('brefore head',feat.shape, feat.dtype)
+        # exit(0)
         if self.feature_extractor is None:
             return feat
         if num_sequences is None:
             return self.feature_extractor(feat)
 
         output = self.feature_extractor(feat)
+        if unit_1st_dim:
+            return output.reshape(1, -1, *output.shape[-3:])
         return output.reshape(-1, num_sequences, *output.shape[-3:])
 
     def get_filter_and_features(self, train_feat, test_feat, train_label, *args, **kwargs):

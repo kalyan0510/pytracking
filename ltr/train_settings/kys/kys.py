@@ -36,7 +36,7 @@ def run(settings):
 
     lasot_train = Lasot(settings.env.lasot_dir, split='train')
     got10k_train = Got10k(settings.env.got10k_dir, split='vottrain')
-    trackingnet_train = TrackingNet(settings.env.trackingnet_dir, set_ids=[0, 1, 2, 3, 4])
+    trackingnet_train = TrackingNet(settings.env.trackingnet_dir, set_ids=[0, 1, 2, 3])
 
     # Validation datasets
     got10k_val = Got10k(settings.env.got10k_dir, split='votval')
